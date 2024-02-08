@@ -1,0 +1,13 @@
+name = "Grok"
+uuid = "2699e2e2-b84b-43bb-8950-9a16653c9e27"
+authors = ["Adam Wheeler", "Andy Casey"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
