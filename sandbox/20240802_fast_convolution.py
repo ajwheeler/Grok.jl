@@ -183,7 +183,7 @@ if __name__ == "__main__":
         "~/Downloads/korg_grid_old.h5",
         fix_off_by_one=True,
         fill_non_finite=10.0,
-        fix_vmic=2.0
+        fix_vmic=None
     )    
     
     
@@ -250,9 +250,9 @@ if __name__ == "__main__":
     
     
     from time import time
-    t_init = time()
-    before_chi2, before_continuum, before_grid_point, before_opt_point = analyze_spectrum(wl, flux, e_flux, pixel_flags)
-    t_before = time() - t_init
+    #t_init = time()
+    #before_chi2, before_continuum, before_grid_point, before_opt_point = analyze_spectrum(wl, flux, e_flux, pixel_flags)
+    #t_before = time() - t_init
 
 
     '''
@@ -299,8 +299,13 @@ if __name__ == "__main__":
     # Convolve the grid once and convolve data once
     convolved_inv_model_flux = np.zeros_like(model_flux)
     for si, ei in slices:
-        convolved_inv_model_flux[:, :, :, si:ei] = gaussian_filter1d(1/model_flux[:, :, :, si:ei], sigma, mode=mode, axis=-1)            
-    no_continuum = np.all(convolved_inv_model_flux == 0, axis=(0, 1, 2))        
+        # todo: generalize this slicing whether we have 3 or 4 grid dimensions
+        if model_flux.ndim == 4:
+            convolved_inv_model_flux[:, :, :, si:ei] = gaussian_filter1d(1/model_flux[:, :, :, si:ei], sigma, mode=mode, axis=-1)
+        else:
+            convolved_inv_model_flux[:, :, :, :, si:ei] = gaussian_filter1d(1/model_flux[:, :, :, :, si:ei], sigma, mode=mode, axis=-1)            
+    
+    no_continuum = np.all(convolved_inv_model_flux == 0, axis=tuple(range(convolved_inv_model_flux.ndim - 1)))
         
     '''
         
@@ -347,7 +352,7 @@ if __name__ == "__main__":
         return (chi2, continuum, grid_point, opt_point)   
     '''
     
-    def fast_analyze_spectrum(flux, e_flux, pixel_flags, N=1000):
+    def fast_analyze_spectrum(flux, e_flux, N=1000, full_output=False):
         
         convolved_flux = np.copy(flux)
         for si, ei in slices:
@@ -372,11 +377,12 @@ if __name__ == "__main__":
         ivar = e_flux**(-2)
         ivar[(~np.isfinite(ivar)) | no_continuum] = 0
         
-        chi2 = np.sum((model_flux * continuum - flux)**2 * ivar, axis=-1)      
+        chi2 = np.sum((model_flux * continuum - flux)**2 * ivar, axis=-1)
+        
         shape = continuum.shape[:-1]
 
         index = np.argmin(chi2)
-        i, j, k = np.unravel_index(index, shape)
+        #i, j, k = np.unravel_index(index, shape)
         point = [g[i] for g, i in zip(grid_points, np.unravel_index(index, shape))]
 
         grid_point = dict(zip(labels, point))
@@ -394,13 +400,19 @@ if __name__ == "__main__":
 
             opt_point[label] = xi[np.argmin(yi)]
     
-        return (chi2, continuum, grid_point, opt_point)  
+        if full_output:
+            return (chi2, continuum, grid_point, opt_point)  
+        return (opt_point, np.min(chi2))
+    
+    def _fast_analyze_spectrum(index, flux, e_flux):
+        args = fast_analyze_spectrum(flux, e_flux)
+        return (index, *args)
     
     from time import time
     t_init = time()
-    after_chi2, after_continuum, after_grid_point, after_opt_point = fast_analyze_spectrum(flux, e_flux, pixel_flags)
+    after_chi2, after_continuum, after_grid_point, after_opt_point = fast_analyze_spectrum(flux, e_flux, full_output=True)
     t_after = time() - t_init
-
+    
         
     # options are:
     # 1. do the ratio thing with a gaussian filter
@@ -429,19 +441,45 @@ if __name__ == "__main__":
     fig.tight_layout()
             
 
+    import concurrent.futures
+    from astropy.table import Table
+    
+    
     from glob import glob
 
     paths = glob("/Users/andycasey/research/20240208_kepler_subset_spectra/apStar-*.fits")
-
-    results = []
-    for path in tqdm(paths):
-        wl, flux, e_flux, pixel_flags = read_apstar(path)
-        chi2, continuum, grid_point, opt_point = fast_analyze_spectrum(flux, e_flux, pixel_flags)
-        apogee_id = os.path.basename(path).split("-dr17-")[1].split(".fits")[0]        
-        results.append((apogee_id, opt_point["teff"], opt_point["logg"], opt_point["m_h"], np.min(chi2)))
-
-
-    from astropy.table import Table
-    t = Table(rows=results, names=("apogee_id", "grok_teff", "grok_logg", "grok_m_h", "chi2"))
-    t.write("~/research/20240208_kepler_subset_spectra/fast_grok_results.fits")    
+    PARALLEL = True
+    
+    if PARALLEL:
         
+        pool = concurrent.futures.ThreadPoolExecutor(8)
+        
+        futures = []
+        for path in paths:
+            wl, flux, e_flux, pixel_flags = read_apstar(path)
+            futures.append(pool.submit(_fast_analyze_spectrum, path, flux, e_flux))
+            
+
+
+        results = []
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
+            path, opt_point, min_chi2 = future.result()
+            apogee_id = os.path.basename(path).split("-dr17-")[1].split(".fits")[0]        
+            results.append((apogee_id, opt_point["teff"], opt_point["logg"], opt_point["m_h"], opt_point.get("v_micro", np.nan), min_chi2))
+
+    else:
+                    
+        results = []
+        for i, path in enumerate(tqdm(paths)):
+            wl, flux, e_flux, pixel_flags = read_apstar(path)
+            opt_point, min_chi2 = fast_analyze_spectrum(flux, e_flux)
+            apogee_id = os.path.basename(path).split("-dr17-")[1].split(".fits")[0]        
+            results.append((apogee_id, opt_point["teff"], opt_point["logg"], opt_point["m_h"], opt_point.get("v_micro", np.nan), min_chi2))
+            if i % 10 == 0:
+                t = Table(rows=results, names=("apogee_id", "grok_teff", "grok_logg", "grok_m_h", "grok_v_micro", "chi2"))
+                t.write("~/research/20240208_kepler_subset_spectra/fast_grok_results_with_v_micro.fits", overwrite=True) 
+                print("check")
+    
+    t = Table(rows=results, names=("apogee_id", "grok_teff", "grok_logg", "grok_m_h", "grok_v_micro", "chi2"))
+    t.write("~/research/20240208_kepler_subset_spectra/fast_grok_results_with_v_micro.fits", overwrite=True) 
+    print("check")                

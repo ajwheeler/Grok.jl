@@ -414,9 +414,49 @@ if __name__ == "__main__":
         
 
     fig.tight_layout()
+    
+
+    # Let's do the Tayar comparison
+    import concurrent.futures
+    
+    from astropy.table import Table
+    t = Table.read("/Users/andycasey/research/Grok.jl/sandbox/tayar_2015/apj514696t1_mrt_xm_aspcap.fits")    
+    is_measurement = (t["f_vsini"] != "<")
+    
+    paths = []
+    for twomass_id in t[is_measurement]["2MASS"]:
+        apogee_id = twomass_id.lstrip("J")
+        paths.append(f"/Users/andycasey/research/Grok.jl/sandbox/tayar_2015/spectra/apStar-dr17-2M{apogee_id}.fits")
+    
+    CHECKPOINT_FREQUENCY = 10
+    names=("apogee_id", "grok_teff", "grok_logg", "grok_m_h", "grok_v_micro", "grok_v_sini", "chi2")
+    output_path = "/Users/andycasey/research/Grok.jl/sandbox/tayar_2015/20240209_grok_results.fits"
+
+    
+    pool = concurrent.futures.ThreadPoolExecutor(8)
+    
+    futures = []
+    for path in paths:
+        wl, flux, e_flux, pixel_flags = read_apstar(path)
+        futures.append(pool.submit(_fast_analyze_spectrum, path, flux, e_flux))
+        
+    results = []
+    for i, future in tqdm(enumerate(concurrent.futures.as_completed(futures)), total=len(futures)):
+        path, opt_point, min_chi2 = future.result()
+        apogee_id = os.path.basename(path).split("-dr17-")[1].split(".fits")[0]        
+        results.append((apogee_id, opt_point["teff"], opt_point["logg"], opt_point["m_h"], opt_point.get("v_micro", np.nan), opt_point.get("v_sini", np.nan), min_chi2))            
+        if (i % CHECKPOINT_FREQUENCY) == 0:
+            Table(rows=results, names=names).write(output_path, overwrite=True)
+                
+    Table(rows=results, names=names).write(output_path, overwrite=True)
+    raise a
+        
+    
+    
+    
+
             
 
-    import concurrent.futures
     from astropy.table import Table
     
     
