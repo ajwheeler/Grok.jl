@@ -1,1 +1,5 @@
 /Manifest.toml
+sandbox/tayar_2015/spectra/*
+*.DS_Store
+*.ipynb_checkpoints
+*__pycache__
