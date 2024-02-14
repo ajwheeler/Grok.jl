@@ -4,13 +4,14 @@ using DSP: gaussian, conv  # used for vsini and continuum adjustment
 using SparseArrays: spzeros # used for crazy continuum adjustment
 using Distributed: addprocs, pmap
 
+_data_dir = joinpath(@__DIR__, "../data") 
+
 # TODO addprocs
 
 #####################################################################
 # TODO these should be excised from the module
-#include("element_windows.jl")
 # read the mask that is aplied to all spectra
-const ferre_mask = parse.(Bool, readlines("data/ferre_mask.dat"));
+const ferre_mask = parse.(Bool, readlines(joinpath(_data_dir, "ferre_mask.dat")));
 const ferre_wls = (10 .^ (4.179 .+ 6e-6 * (0:8574)))
 const regions = [
     (15152.0, 15800.0),
@@ -162,7 +163,7 @@ function get_best_nodes(fluxes, ivars, grid)
     stacked_model_spectra = reshape(model_spectra, (size(model_spectra, 1), :))
     convolved_inv_model_flux = 1 ./ stacked_model_spectra
     @showprogress desc="conv'ing inverse models" for i in 1:size(stacked_model_spectra, 2)
-        apply_smoothing_filter!(convolved_inv_model_flux[:, i])
+        apply_smoothing_filter!(view(convolved_inv_model_flux, :, i))
     end
     #convolved_model_flux = reshape(convolved_inv_model_flux, size(model_spectra))
     masked_model_spectra = stacked_model_spectra[ferre_mask, :]
@@ -176,21 +177,17 @@ function get_best_nodes(fluxes, ivars, grid)
 
         #filtered_flux = flux ./ quote_unquote_continuum
 
-        #=
-        println("size of flux: ", size(flux))
-        println("size of quote_unquote_continuum: ", size(quote_unquote_continuum))
-        println("size of filtered_flux: ", size(filtered_flux))
-        println("size of ivar: ", size(ivar))
-        println("size of ferre_mask: ", size(ferre_mask))
-        println("size of masked_model_spectra: ", size(masked_model_spectra))
-        =#
-
         chi2 = sum((masked_model_spectra .* quote_unquote_continuum .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
+        best_ind_stacked = argmin(chi2[:])
+        best_fit_model_spec = masked_model_spectra[:, best_ind_stacked] .* quote_unquote_continuum[:, best_ind_stacked]
         chi2 = reshape(chi2, size(model_spectra)[2:end])
         best_inds = collect(Tuple(argmin(chi2)))
         best_fit_node = getindex.(grid_points, best_inds) # the label values of the best-fit node
 
-        (best_fit_node, minimum(chi2 / 8575))
+        (best_fit_node, 
+         minimum(chi2 / 8575),
+         quote_unquote_continuum[:, best_ind_stacked],
+         masked_model_spectra[:, best_ind_stacked])
     end
 end
 
