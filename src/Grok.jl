@@ -166,28 +166,60 @@ function get_best_nodes(fluxes, ivars, grid)
         apply_smoothing_filter!(view(convolved_inv_model_flux, :, i))
     end
     #convolved_model_flux = reshape(convolved_inv_model_flux, size(model_spectra))
-    masked_model_spectra = stacked_model_spectra[ferre_mask, :]
+    masked_model_spectra = (stacked_model_spectra .* convolved_inv_model_flux)[ferre_mask, :]
+    # reshape back
+    masked_model_spectra = reshape(masked_model_spectra, (size(masked_model_spectra, 1), size(model_spectra)[2:end]...))
 
     @showprogress desc="finding best-fit nodes" pmap(fluxes, ivars) do flux, ivar
         #convolved_flux = filter * flux
         convF = copy(flux)
         fill_chip_gaps!(convF)
         apply_smoothing_filter!(convF)
-        quote_unquote_continuum = (convF .* convolved_inv_model_flux)[ferre_mask, :]
+        #quote_unquote_continuum = (convF .* convolved_inv_model_flux)[ferre_mask, :]
 
         #filtered_flux = flux ./ quote_unquote_continuum
 
-        chi2 = sum((masked_model_spectra .* quote_unquote_continuum .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
-        best_ind_stacked = argmin(chi2[:])
-        best_fit_model_spec = masked_model_spectra[:, best_ind_stacked] .* quote_unquote_continuum[:, best_ind_stacked]
-        chi2 = reshape(chi2, size(model_spectra)[2:end])
-        best_inds = collect(Tuple(argmin(chi2)))
-        best_fit_node = getindex.(grid_points, best_inds) # the label values of the best-fit node
+        # todo: limit this to max refinements
+        overlap = 0.5
+        n_refinements = 4
 
-        (best_fit_node, 
-         minimum(chi2 / 8575),
-         quote_unquote_continuum[:, best_ind_stacked],
-         masked_model_spectra[:, best_ind_stacked])
+        sis = ones(Int, length(size(model_spectra)[2:end]))
+        eis = size(model_spectra)[2:end]
+
+        chi2 = nothing
+        index = nothing
+        for S in (2 .^ (n_refinements:-1:0))
+            slicer = [si:S:ei for (si, ei) in zip(sis, eis)]
+        
+            chi2 = sum((view(masked_model_spectra, :, slicer...) .* convF[ferre_mask] .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
+            
+            rel_index = collect(Tuple(argmin(chi2)))[2:end]
+            index = (sis .- 1) + S * rel_index
+
+            offset = Int(ceil((1 + overlap) * S))
+            sis = max.(index .- offset, 1)
+            eis = min.(index .+ offset, collect(size(model_spectra)[2:end]))
+            
+            #print(minimum(chi2), " ", sis, " ", eis, "\n")
+        end
+
+        best_fit_node = getindex.(grid_points, index)
+    
+        
+        #chi2 = sum((masked_model_spectra .* convF .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
+        #best_ind_stacked = argmin(chi2[:])
+        #best_fit_model_spec = masked_model_spectra[:, best_ind_stacked] .* quote_unquote_continuum[:, best_ind_stacked]
+        #chi2 = reshape(chi2, size(model_spectra)[2:end])
+        #best_inds = collect(Tuple(argmin(chi2)))
+        #best_fit_node = getindex.(grid_points, best_inds) # the label values of the best-fit node
+
+        #(best_fit_node, 
+        # minimum(chi2),
+        # stacked_model_spectra[:, best_ind_stacked])
+        (best_fit_node,
+         minimum(chi2),
+         model_spectra[:, index...]
+         )
     end
 end
 
