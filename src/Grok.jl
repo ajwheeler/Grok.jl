@@ -2,7 +2,6 @@ module Grok
 using HDF5, Optim, FITSIO, Interpolations, Korg, ProgressMeter
 using DSP: gaussian, conv  # used for vsini and continuum adjustment
 using SparseArrays: spzeros # used for crazy continuum adjustment
-using Distributed: addprocs, pmap
 
 _data_dir = joinpath(@__DIR__, "../data") 
 
@@ -170,7 +169,10 @@ function get_best_nodes(fluxes, ivars, grid)
     # reshape back
     masked_model_spectra = reshape(masked_model_spectra, (size(masked_model_spectra, 1), size(model_spectra)[2:end]...))
 
-    @showprogress desc="finding best-fit nodes" pmap(fluxes, ivars) do flux, ivar
+    out = Array{Any}(undef, length(fluxes))
+    p = Progress(length(fluxes); dt=1.0, desc="finding best-fit nodes")
+    for (i, (flux, ivar)) in enumerate(zip(fluxes, ivars))
+    #@showprogress desc="finding best-fit nodes" pmap(fluxes, ivars) do flux, ivar
         #convolved_flux = filter * flux
         convF = copy(flux)
         fill_chip_gaps!(convF)
@@ -216,11 +218,15 @@ function get_best_nodes(fluxes, ivars, grid)
         #(best_fit_node, 
         # minimum(chi2),
         # stacked_model_spectra[:, best_ind_stacked])
-        (best_fit_node,
+        out[i] = (best_fit_node,
          minimum(chi2),
          model_spectra[:, index...]
          )
+
+         next!(p)
     end
+    finish!(p)
+    out
 end
 
 #=
