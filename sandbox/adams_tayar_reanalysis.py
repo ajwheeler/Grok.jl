@@ -4,11 +4,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-from juliacall import Main as jl
-# TODO dev it instead
-jl.include("../src/Grok.jl")
-Grok = jl.Grok
-
 def expand_path(path):
     return os.path.abspath(os.path.expanduser(path))
 
@@ -90,14 +85,16 @@ def inflate_errors_at_bad_pixels(
 
     return (flux, e_flux)
 
-def read_tayar_files():
+def read_tayar_files(tayar_dir="tayar_2015"):
+    print(tayar_dir)
     from astropy.table import Table
-    t = Table.read("tayar_2015/apj514696t1_mrt_xm_aspcap.fits")    
+    t = Table.read(os.path.join(tayar_dir, "apj514696t1_mrt_xm_aspcap.fits"))
+    print(tayar_dir)
     is_measurement = (t["f_vsini"] != "<")
     paths = []
     for twomass_id in t[is_measurement]["2MASS"]:
         apogee_id = twomass_id.lstrip("J")
-        paths.append(f"tayar_2015/spectra/apStar-dr17-2M{apogee_id}.fits")
+        paths.append(tayar_dir + f"/spectra/apStar-dr17-2M{apogee_id}.fits")
     
     fluxes = []
     ivars = []
@@ -109,6 +106,10 @@ def read_tayar_files():
     return fluxes, ivars, t
 
 if __name__ == '__main__':
+    from juliacall import Main as jl
+    jl.include("../src/Grok.jl")
+    Grok = jl.Grok
+
     fluxes, ivars, t = read_tayar_files()
 
     grid_file = "../../grok_old/korg_grid_old.h5"
