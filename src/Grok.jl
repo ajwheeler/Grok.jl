@@ -65,7 +65,7 @@ function fill_chip_gaps!(flux)
     end
 end
 
-function apply_smoothing_filter!(flux, kernel_width=50;
+function apply_smoothing_filter!(flux, kernel_width=150;
                                 kernel_pixels=301)
                                 
     @assert isodd(kernel_pixels) # required for offset math to work
@@ -169,58 +169,52 @@ function get_best_nodes(fluxes, ivars, grid)
     # reshape back
     masked_model_spectra = reshape(masked_model_spectra, (size(masked_model_spectra, 1), size(model_spectra)[2:end]...))
 
+    # iterate over the obbserved spectra
     out = Array{Any}(undef, length(fluxes))
     p = Progress(length(fluxes); dt=1.0, desc="finding best-fit nodes")
     for (i, (flux, ivar)) in enumerate(zip(fluxes, ivars))
-    #@showprogress desc="finding best-fit nodes" pmap(fluxes, ivars) do flux, ivar
-        #convolved_flux = filter * flux
         convF = copy(flux)
         fill_chip_gaps!(convF)
         apply_smoothing_filter!(convF)
-        #quote_unquote_continuum = (convF .* convolved_inv_model_flux)[ferre_mask, :]
 
-        #filtered_flux = flux ./ quote_unquote_continuum
-
-        # todo: limit this to max refinements
+        # rather than comparing the observed spectrum to every single model in the grid, we 
+        # subsample at every 2^n nodes, turning n down from n_refinements to 0.
+        # TODO limit this to max refinements
         overlap = 0.5
         n_refinements = 4
 
-        sis = ones(Int, length(size(model_spectra)[2:end]))
-        eis = size(model_spectra)[2:end]
+        start_indices = ones(Int, length(size(model_spectra)[2:end]))
+        end_indices = size(model_spectra)[2:end]
 
-        chi2 = nothing
-        index = nothing
+        chi2 = Array{Float64}(undef, size(masked_model_spectra)[2:end])
+        rel_index = nothing # index into the sub-array of chi2 values
+        index = nothing # index into the (not actually constructed) full array of chi2 values
+        slicer = nothing
+        # S is the "step size"
         for S in (2 .^ (n_refinements:-1:0))
-            slicer = [si:S:ei for (si, ei) in zip(sis, eis)]
+            slicer = [si:S:ei for (si, ei) in zip(start_indices, end_indices)]
         
             chi2 = sum((view(masked_model_spectra, :, slicer...) .* convF[ferre_mask] .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
             
             rel_index = collect(Tuple(argmin(chi2)))[2:end]
-            index = (sis .- 1) + S * rel_index
+            index = (start_indices .- 1) + S * rel_index
 
             offset = Int(ceil((1 + overlap) * S))
-            sis = max.(index .- offset, 1)
-            eis = min.(index .+ offset, collect(size(model_spectra)[2:end]))
-            
-            #print(minimum(chi2), " ", sis, " ", eis, "\n")
+            start_indices = max.(index .- offset, 1)
+            end_indices = min.(index .+ offset, collect(size(model_spectra)[2:end]))
+        end
+        best_fit_node = getindex.(grid_points, index)
+        splines = map(1:length(best_fit_node)) do index_index
+            # the best-fit index for each dimension, but a colon for the one that this spline is over
+            slice = [rel_index[1:index_index-1] ; : ; rel_index[index_index+1:end]]
+
+            Korg.CubicSplines.CubicSpline(grid_points[index_index][slicer[index_index]], chi2[1, slice...])
         end
 
-        best_fit_node = getindex.(grid_points, index)
-    
-        
-        #chi2 = sum((masked_model_spectra .* convF .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
-        #best_ind_stacked = argmin(chi2[:])
-        #best_fit_model_spec = masked_model_spectra[:, best_ind_stacked] .* quote_unquote_continuum[:, best_ind_stacked]
-        #chi2 = reshape(chi2, size(model_spectra)[2:end])
-        #best_inds = collect(Tuple(argmin(chi2)))
-        #best_fit_node = getindex.(grid_points, best_inds) # the label values of the best-fit node
-
-        #(best_fit_node, 
-        # minimum(chi2),
-        # stacked_model_spectra[:, best_ind_stacked])
         out[i] = (best_fit_node,
          minimum(chi2),
-         model_spectra[:, index...]
+         model_spectra[:, index...],
+         splines
          )
 
          next!(p)
