@@ -3,7 +3,6 @@ using HDF5, Optim, FITSIO, Interpolations, Korg, ProgressMeter
 using DSP: gaussian, conv  # used for vsini and continuum adjustment
 using SparseArrays: spzeros # used for crazy continuum adjustment
 using Distributed: addprocs, pmap
-using Statistics: mean
 
 # TODO addprocs
 
@@ -11,7 +10,7 @@ using Statistics: mean
 # TODO these should be excised from the module
 #include("element_windows.jl")
 # read the mask that is aplied to all spectra
-const ferre_mask = parse.(Bool, readlines("ferre_mask.dat"));
+const ferre_mask = parse.(Bool, readlines("data/ferre_mask.dat"));
 const ferre_wls = (10 .^ (4.179 .+ 6e-6 * (0:8574)))
 const regions = [
     (15152.0, 15800.0),
