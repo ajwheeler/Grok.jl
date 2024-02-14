@@ -101,7 +101,7 @@ def read_tayar_files():
     
     fluxes = []
     ivars = []
-    for path in tqdm(paths[1:10], "load spectra"):
+    for path in tqdm(paths, "load spectra"):
         wl, flux, e_flux, pixel_flags = read_apstar(path)
         fluxes.append(flux)
         ivars.append(e_flux ** (-1/2))
@@ -111,7 +111,10 @@ def read_tayar_files():
 if __name__ == '__main__':
     fluxes, ivars, t = read_tayar_files()
 
-    best_fit_nodes = Grok.get_best_nodes(fluxes, ivars, "../../grok_old/korg_grid_old.h5")
+    grid_file = "../../grok_old/korg_grid_old.h5"
+    grid = Grok.load_grid(grid_file, fix_vmic=1.0, fix_off_by_one=True, v_sinis=np.arange(0, 10, step=1.0))
+
+    best_fit_nodes = Grok.get_best_nodes(fluxes, ivars, grid)
     print(best_fit_nodes)
 
     #names=("apogee_id", "grok_teff", "grok_logg", "grok_m_h", "grok_v_micro", "grok_v_sini", "chi2")

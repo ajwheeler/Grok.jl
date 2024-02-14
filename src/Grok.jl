@@ -1,8 +1,9 @@
 module Grok
 using HDF5, Optim, FITSIO, Interpolations, Korg, ProgressMeter
-using DSP: conv  # used for vsini
+using DSP: gaussian, conv  # used for vsini and continuum adjustment
 using SparseArrays: spzeros # used for crazy continuum adjustment
 using Distributed: addprocs, pmap
+using Statistics: mean
 
 # TODO addprocs
 
@@ -12,6 +13,14 @@ using Distributed: addprocs, pmap
 # read the mask that is aplied to all spectra
 const ferre_mask = parse.(Bool, readlines("ferre_mask.dat"));
 const ferre_wls = (10 .^ (4.179 .+ 6e-6 * (0:8574)))
+const regions = [
+    (15152.0, 15800.0),
+    (15867.0, 16424.0),
+    (16484.0, 16944.0), 
+]
+const region_inds = map(regions) do (lb, ub)
+    findfirst(ferre_wls .> lb) : (findfirst(ferre_wls .> ub) - 1)
+end
 #####################################################################
 
 """
@@ -45,6 +54,30 @@ function apply_rotation(flux, vsini; ε=0.6, log_lambda_step=1.3815510557964276e
     offset = (length(rotation_kernel) - 1) ÷ 2
 
     conv(rotation_kernel, flux)[offset+1 : end-offset]
+end
+
+function fill_chip_gaps!(flux)
+    Δ = 10 # insurance
+    # set the off-chip flux values to be reasonable, so as to not have crazy edge effects
+    flux[1:region_inds[1][1]] .= flux[region_inds[1][1] + Δ]
+    flux[region_inds[end][end]:end] .= flux[region_inds[end][end] - Δ]
+    for (i1, i2) in [(region_inds[1][end], region_inds[2][1]), (region_inds[2][end], region_inds[3][1])]
+        flux[i1:i2] .= range(start=flux[i1-Δ], stop=flux[i2+Δ], length=i2-i1 + 1)
+    end
+end
+
+function apply_smoothing_filter!(flux, kernel_width=50;
+                                kernel_pixels=301)
+                                
+    @assert isodd(kernel_pixels) # required for offset math to work
+    sampled_kernel = gaussian(kernel_pixels, kernel_width/kernel_pixels)
+    sampled_kernel ./= sum(sampled_kernel) # normalize (everything should cancel in the end, but I'm paranoid)
+    offset = (length(sampled_kernel) - 1) ÷ 2
+
+    map(region_inds) do r
+        buffered_region = r[1]-offset : r[end]+offset
+        flux[buffered_region] = conv(sampled_kernel, flux[buffered_region])[offset+1 : end-offset]
+    end
 end
 
 """
@@ -117,47 +150,48 @@ function _normal_pdf(Δ, σ; cuttoff=3)
     end
 end
 
-function calculate_filter()
-    #TODO modify this to act chipwise?
-    n_wls = length(ferre_wls)
-    oversampled_kernel = _normal_pdf.((1 - n_wls) : n_wls, 51)
-    filter = spzeros(n_wls, n_wls)
-    @showprogress desc="calculating smoothing filter" for i in 1:n_wls
-        k = oversampled_kernel[i+n_wls-1 : -1 : i]
-        filter[:, i] .= k ./ sum(k)
-    end
-    filter
-end
-
 """
 fluxes and ivar should be vectors or lists of the same length whose elements are vectors of length 
 8575.
 """
-function get_best_nodes(fluxes, ivars, filter, grid)
+function get_best_nodes(fluxes, ivars, grid)
     fluxes = Vector{Float64}.(collect.(fluxes))
     ivars = Vector{Float64}.(collect.(ivars))
     labels, grid_points, model_spectra = grid 
 
     # reshape the model spectra to be a 2D array w/ first dimension corresponding to wavelength
     stacked_model_spectra = reshape(model_spectra, (size(model_spectra, 1), :))
-    convolved_inv_model_flux = similar(stacked_model_spectra)
+    convolved_inv_model_flux = 1 ./ stacked_model_spectra
     @showprogress desc="conv'ing inverse models" for i in 1:size(stacked_model_spectra, 2)
-        convolved_inv_model_flux[:, i] = filter * (1 ./ stacked_model_spectra[:, i])
+        apply_smoothing_filter!(convolved_inv_model_flux[:, i])
     end
-    convolved_model_flux = reshape(convolved_inv_model_flux, size(model_spectra))
-    println(size(convolved_model_flux))
-    # convolve and reshape back to have a dimension per parameter
-    #convolved_inv_model_flux = reshape(filter * (1 ./ stacked_model_spectra), size(model_spectra))
-
-    masked_model_spectra = model_spectra[ferre_mask, (1:s for s in size(model_spectra)[2:end])...]
+    #convolved_model_flux = reshape(convolved_inv_model_flux, size(model_spectra))
+    masked_model_spectra = stacked_model_spectra[ferre_mask, :]
 
     @showprogress desc="finding best-fit nodes" pmap(fluxes, ivars) do flux, ivar
         #convolved_flux = filter * flux
-        #quote_unquote_continuum = convolved_flux .* convolved_inv_model_flux
+        convF = copy(flux)
+        fill_chip_gaps!(convF)
+        apply_smoothing_filter!(convF)
+        quote_unquote_continuum = (convF .* convolved_inv_model_flux)[ferre_mask, :]
 
-        chi2 = sum((masked_model_spectra .- flux[ferre_mask]).^2 .* ivar[ferre_mask], dims=1)
-        best_inds = collect(Tuple(argmin(chi2)))[2:end]
+        #filtered_flux = flux ./ quote_unquote_continuum
+
+        #=
+        println("size of flux: ", size(flux))
+        println("size of quote_unquote_continuum: ", size(quote_unquote_continuum))
+        println("size of filtered_flux: ", size(filtered_flux))
+        println("size of ivar: ", size(ivar))
+        println("size of ferre_mask: ", size(ferre_mask))
+        println("size of masked_model_spectra: ", size(masked_model_spectra))
+        =#
+
+        chi2 = sum((masked_model_spectra .* quote_unquote_continuum .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
+        chi2 = reshape(chi2, size(model_spectra)[2:end])
+        best_inds = collect(Tuple(argmin(chi2)))
         best_fit_node = getindex.(grid_points, best_inds) # the label values of the best-fit node
+
+        (best_fit_node, minimum(chi2 / 8575))
     end
 end
 
