@@ -2,6 +2,7 @@ module Grok
 using HDF5, Optim, FITSIO, Interpolations, Korg, ProgressMeter
 using DSP: gaussian, conv  # used for vsini and continuum adjustment
 using SparseArrays: spzeros # used for crazy continuum adjustment
+using Statistics: median
 
 _data_dir = joinpath(@__DIR__, "../data") 
 
@@ -178,18 +179,19 @@ function get_best_nodes(fluxes, ivars, grid; use_median_ratio=false)
     labels, grid_points, model_spectra = grid 
 
     # reshape the model spectra to be a 2D array w/ first dimension corresponding to wavelength
-    stacked_model_spectra = reshape(model_spectra, (size(model_spectra, 1), :))
     if !use_median_ratio
+        stacked_model_spectra = reshape(model_spectra, (size(model_spectra, 1), :))
         convolved_inv_model_flux = 1 ./ stacked_model_spectra
         @showprogress desc="conv'ing inverse models" for i in 1:size(stacked_model_spectra, 2)
             apply_smoothing_filter!(view(convolved_inv_model_flux, :, i))
         end
         #convolved_model_flux = reshape(convolved_inv_model_flux, size(model_spectra))
         masked_model_spectra = (stacked_model_spectra .* convolved_inv_model_flux)[ferre_mask, :]
-        # reshape back
+        # reshape back. These have the convolved inverse model flux divided out already
+        # (so the name is slightly wrong)
         masked_model_spectra = reshape(masked_model_spectra, (size(masked_model_spectra, 1), size(model_spectra)[2:end]...))
     else
-        masked_model_spectra = stacked_model_spectra[ferre_mask, :]
+        masked_model_spectra = model_spectra[ferre_mask, (1:s for s in size(model_spectra)[2:end])...]
     end
 
     # iterate over the obbserved spectra
@@ -222,9 +224,11 @@ function get_best_nodes(fluxes, ivars, grid; use_median_ratio=false)
 
             corrected_model_f = if use_median_ratio
                 continua = (flux[ferre_mask, :] ./ model_f)
-                for slice in eachslice(continua, dims=1)
-                    continua[slice] .= moving_median(continua[slice])
+                stacked_continua = reshape(continua, (size(continua, 1), :))
+                for i in 1:size(stacked_continua, 2)
+                    stacked_continua[:, i] .= moving_median(stacked_continua[:, i])
                 end
+                @assert continua[:] == stacked_continua[:] #TODO remove
                 model_f .* continua
             else
                 # in this case, model_f already has the filtered model flux divided out
