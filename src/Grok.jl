@@ -3,6 +3,7 @@ using HDF5, Optim, FITSIO, Interpolations, Korg, ProgressMeter
 using DSP: gaussian, conv  # used for vsini and continuum adjustment
 using SparseArrays: spzeros # used for crazy continuum adjustment
 using Statistics: median
+using FastRunningMedian
 
 _data_dir = joinpath(@__DIR__, "../data") 
 
@@ -226,7 +227,8 @@ function get_best_nodes(fluxes, ivars, grid; use_median_ratio=false)
                 continua = (flux[ferre_mask, :] ./ model_f)
                 stacked_continua = reshape(continua, (size(continua, 1), :))
                 for i in 1:size(stacked_continua, 2)
-                    stacked_continua[:, i] .= moving_median(stacked_continua[:, i])
+                    #stacked_continua[:, i] .= moving_median(stacked_continua[:, i])
+                    stacked_continua[:, i] .= running_median(stacked_continua[:, i], 151)
                 end
                 @assert continua[:] == stacked_continua[:] #TODO remove
                 model_f .* continua
