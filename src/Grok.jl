@@ -80,6 +80,25 @@ function apply_smoothing_filter!(flux, kernel_width=150;
 end
 
 """
+This can be sped up significantly
+"""
+function moving_median(f; bandwidth=151)
+    @assert isodd(bandwidth)
+    half_bandwidth = (bandwidth - 1) ÷ 2
+    lb = 1 - half_bandwidth
+    ub = 1 + half_bandwidth
+
+    medians = similar(f) 
+    for i in 1:length(f)
+        medians[i] = median(f[max(lb, 1) : min(ub, end)])
+        lb += 1
+        ub += 1
+    end
+    
+    medians
+end
+
+"""
 This loads a grok model grid.
 """
 function load_grid(grid_path; fix_vmic=nothing, fill_non_finite=10.0, fix_off_by_one=false, 
@@ -153,29 +172,35 @@ end
 fluxes and ivar should be vectors or lists of the same length whose elements are vectors of length 
 8575.
 """
-function get_best_nodes(fluxes, ivars, grid)
+function get_best_nodes(fluxes, ivars, grid; use_median_ratio=false)
     fluxes = Vector{Float64}.(collect.(fluxes))
     ivars = Vector{Float64}.(collect.(ivars))
     labels, grid_points, model_spectra = grid 
 
     # reshape the model spectra to be a 2D array w/ first dimension corresponding to wavelength
     stacked_model_spectra = reshape(model_spectra, (size(model_spectra, 1), :))
-    convolved_inv_model_flux = 1 ./ stacked_model_spectra
-    @showprogress desc="conv'ing inverse models" for i in 1:size(stacked_model_spectra, 2)
-        apply_smoothing_filter!(view(convolved_inv_model_flux, :, i))
+    if !use_median_ratio
+        convolved_inv_model_flux = 1 ./ stacked_model_spectra
+        @showprogress desc="conv'ing inverse models" for i in 1:size(stacked_model_spectra, 2)
+            apply_smoothing_filter!(view(convolved_inv_model_flux, :, i))
+        end
+        #convolved_model_flux = reshape(convolved_inv_model_flux, size(model_spectra))
+        masked_model_spectra = (stacked_model_spectra .* convolved_inv_model_flux)[ferre_mask, :]
+        # reshape back
+        masked_model_spectra = reshape(masked_model_spectra, (size(masked_model_spectra, 1), size(model_spectra)[2:end]...))
+    else
+        masked_model_spectra = stacked_model_spectra[ferre_mask, :]
     end
-    #convolved_model_flux = reshape(convolved_inv_model_flux, size(model_spectra))
-    masked_model_spectra = (stacked_model_spectra .* convolved_inv_model_flux)[ferre_mask, :]
-    # reshape back
-    masked_model_spectra = reshape(masked_model_spectra, (size(masked_model_spectra, 1), size(model_spectra)[2:end]...))
 
     # iterate over the obbserved spectra
     out = Array{Any}(undef, length(fluxes))
     p = Progress(length(fluxes); dt=1.0, desc="finding best-fit nodes")
     for (i, (flux, ivar)) in enumerate(zip(fluxes, ivars))
-        convF = copy(flux)
-        fill_chip_gaps!(convF)
-        apply_smoothing_filter!(convF)
+        if !use_median_ratio
+            convF = copy(flux)
+            fill_chip_gaps!(convF)
+            apply_smoothing_filter!(convF)
+        end
 
         # rather than comparing the observed spectrum to every single model in the grid, we 
         # subsample at every 2^n nodes, turning n down from n_refinements to 0.
@@ -193,8 +218,20 @@ function get_best_nodes(fluxes, ivars, grid)
         # S is the "step size"
         for S in (2 .^ (n_refinements:-1:0))
             slicer = [si:S:ei for (si, ei) in zip(start_indices, end_indices)]
-        
-            chi2 = sum((view(masked_model_spectra, :, slicer...) .* convF[ferre_mask] .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
+            model_f  = view(masked_model_spectra, :, slicer...) 
+
+            corrected_model_f = if use_median_ratio
+                continua = (flux[ferre_mask, :] ./ model_f)
+                for slice in eachslice(continua, dims=1)
+                    continua[slice] .= moving_median(continua[slice])
+                end
+                model_f .* continua
+            else
+                # in this case, model_f already has the filtered model flux divided out
+                model_f .* convF[ferre_mask]
+            end
+
+            chi2 = sum((corrected_model_f .- flux[ferre_mask, :]).^2 .* ivar[ferre_mask], dims=1)
             
             rel_index = collect(Tuple(argmin(chi2)))[2:end]
             index = (start_indices .- 1) + S * rel_index
